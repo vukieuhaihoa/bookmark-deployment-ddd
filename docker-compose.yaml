@@ -1,0 +1,60 @@
+version: "3.7"
+
+services:
+  redis:
+    image: redis:alpine
+    container_name: redis
+  
+  postgres:
+    image: postgres:17
+    container_name: postgres
+    env_file:
+      - ./postgres/.env 
+    volumes:
+      - ./postgres/init_db:/docker-entrypoint-initdb.d
+      - ./pgdata:/var/lib/postgresql/data
+  
+  bookmark_service:
+    image: haihoanguci/bookmark-service:dev
+    restart: always
+    container_name: bookmark_service
+    depends_on:
+      - redis
+      - postgres
+    env_file:
+      - ./bookmark-service/.env
+    volumes:
+      - ./public_key.pem:/app/public_key.pem
+  
+  user_service:
+    image: haihoanguci/user-service:dev
+    restart: always
+    container_name: user_service
+    depends_on:
+      - redis
+      - postgres
+    env_file:
+      - ./user-service/.env
+    volumes:
+      - ./public_key.pem:/app/public_key.pem
+      - ./private_key.pem:/app/private_key.pem
+  portal:
+    image: ebvn/bookmark-app-portal:ddd
+    restart: always
+    container_name: portal
+    depends_on:
+      - bookmark_service
+      - user_service
+
+  nginx:
+    image: nginx:alpine
+    restart: always
+    container_name: nginx
+    volumes:
+      - ./nginx/nginx.conf:/etc/nginx/conf.d/default.conf
+    ports:
+      - "80:80"
+
+networks:
+  default:
+    name: bookmark_ddd_network

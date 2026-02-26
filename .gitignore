@@ -1,0 +1,8 @@
+# environment files
+*.env
+
+pgdata/
+
+# RSA keys
+private_key.pem
+public_key.pem
