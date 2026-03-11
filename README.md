@@ -24,28 +24,41 @@ Docker Compose deployment configuration for the Bookmark Management system, a fu
                     │  /api/user_service/*      → user_service             │
                     │  /p[base62]               → bookmark_service (301)   │
                     │  /r[8 chars]              → bookmark_service (301)   │
-                    └───┬───────────────────┬───────────────────┬──────────┘
-                        │                   │                   │
-            ┌───────────▼──┐    ┌───────────▼──────┐  ┌────────▼────────┐
-            │    portal    │    │   user_service   │  │bookmark_service │
-            │  (Frontend)  │    │    :8080         │  │    :8080        │
-            │    :3000     │    │                  │  │                 │
-            │              │    │ - Register       │  │ - Shorten URL   │
-            │ - Login UI   │    │ - Login / JWT    │  │ - Redirect      │
-            │ - Bookmarks  │    │ - Update profile │  │ - CRUD bookmarks│
-            │ - Shorten URL│    │                  │  │                 │
-            └──────────────┘    └────────┬─────────┘  └─────────┬───────┘
-                                         │                      │
-                              ┌──────────▼──────────────────────▼─────────┐
-                              │            bookmark_ddd_network           │
-                              │                                           │
-                              │  ┌───────────────┐   ┌─────────────────┐  │
-                              │  │    redis      │   │    postgres     │  │
-                              │  │               │   │                 │  │
-                              │  │ - short code  │   │ - "user" db     │  │
-                              │  │   → url cache │   │ - "bookmark" db │  │
-                              │  └───────────────┘   └─────────────────┘  │
-                              └───────────────────────────────────────────┘
+                    └───┬───────────────┬───────────────┬───────────────┬──┘
+                        │               │               │               │
+            ┌───────────▼──┐  ┌─────────▼──────┐   ┌────▼────────────┐  │
+            │    portal    │  │  user_service  │   │bookmark_service │  │
+            │  (Frontend)  │  │    :8080       │   │    :8080        │  │
+            │    :3000     │  │                │   │                 │  │
+            │              │  │ - Register     │   │ - Shorten URL   │  │
+            │ - Login UI   │  │ - Login / JWT  │   │ - Redirect      │  │
+            │ - Bookmarks  │  │ - Update       │   │ - CRUD bookmarks│  │
+            │ - Shorten URL│  │   profile      │   │ - Enqueue import│  │
+            └──────────────┘  └───────┬────────┘   └────────┬────────┘  │
+                                      │                     │           │
+                                      │             ┌───────▼───────┐   │
+                                      │             │bookmark_worker│   │
+                                      │             │  (no port)    │   │
+                                      │             │               │   │
+                                      │             │ - Pop Redis   │   │
+                                      │             │   queue       │   │
+                                      │             │ - 5 workers   │   │
+                                      │             │ - Insert DB   │   │
+                                      │             │ - Invalidate  │   │
+                                      │             │   cache       │   │
+                                      │             └───────┬───────┘   │
+                                      │                     │           │
+                              ┌───────▼─────────────────────▼───────────▼──┐
+                              │              bookmark_ddd_network          │
+                              │                                            │
+                              │  ┌───────────────┐   ┌─────────────────┐   │
+                              │  │    redis      │   │    postgres     │   │
+                              │  │               │   │                 │   │
+                              │  │ - short code  │   │ - "user" db     │   │
+                              │  │   → url cache │   │ - "bookmark" db │   │
+                              │  │ - import queue│   │                 │   │
+                              │  └───────────────┘   └─────────────────┘   │
+                              └────────────────────────────────────────────┘
 ```
 
 ---
@@ -58,8 +71,9 @@ Docker Compose deployment configuration for the Bookmark Management system, a fu
 | `portal`           | `ebvn/bookmark-app-portal:ddd`      | 3000            | Frontend SPA                         |
 | `user_service`     | `haihoanguci/user-service:dev`      | 8080            | Auth & user management               |
 | `bookmark_service` | `haihoanguci/bookmark-service:dev`  | 8080            | Bookmark & URL shortener             |
+| `bookmark_worker`  | `haihoanguci/bookmark-worker:dev`   | —               | Background import worker             |
 | `postgres`         | `postgres:17`                       | 5432            | Persistent storage (2 databases)     |
-| `redis`            | `redis:alpine`                      | 6379            | Short URL cache                      |
+| `redis`            | `redis:alpine`                      | 6379            | Short URL cache & import queue       |
 
 ---
 
@@ -94,6 +108,7 @@ Rate limiting is configured (`10 req/min` per IP) on API routes and can be enabl
 
 - `user_service` holds the **RSA private key** (`private_key.pem`) — signs JWT tokens on login.
 - `bookmark_service` holds only the **RSA public key** (`public_key.pem`) — verifies tokens on protected routes.
+- `bookmark_worker` has no HTTP port — it communicates only via Redis queue and PostgreSQL.
 
 ---
 
@@ -113,6 +128,7 @@ Create the required `.env` files before starting:
 ```
 postgres/.env
 bookmark-service/.env
+bookmark-worker/.env
 user-service/.env
 ```
 
@@ -168,6 +184,8 @@ make generate-rsa-key
 │       └── init.sql             # Creates "user" and "bookmark" databases
 ├── bookmark-service/
 │   └── .env                     # bookmark_service environment config
+├── bookmark-worker/
+│   └── .env                     # bookmark_worker environment config
 ├── user-service/
 │   └── .env                     # user_service environment config
 ├── public_key.pem               # RSA public key (shared with services)
@@ -198,4 +216,14 @@ Client → nginx → bookmark_service → redis (store short_code → original u
 **Visit a short URL**
 ```
 Client → nginx (/p... or /r...) → bookmark_service → redis (lookup) → 301 redirect
+```
+
+**Import bookmarks (bulk)**
+```
+Client → nginx → bookmark_service → redis (enqueue import job)
+                                            │
+                                    bookmark_worker (5 concurrent workers)
+                                            │
+                                            ├─► postgres("bookmark" db) — insert records
+                                            └─► redis — invalidate list_bookmarks_{user_id} cache
 ```

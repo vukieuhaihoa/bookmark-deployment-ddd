@@ -26,6 +26,16 @@ services:
     volumes:
       - ./public_key.pem:/app/public_key.pem
   
+  bookmark_worker:
+    image: haihoanguci/bookmark-worker:dev
+    restart: always
+    container_name: bookmark_worker
+    depends_on:
+      - redis
+      - postgres
+    env_file:
+      - ./bookmark-worker/.env
+
   user_service:
     image: haihoanguci/user-service:dev
     restart: always
